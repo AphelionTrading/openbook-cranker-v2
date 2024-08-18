@@ -1,135 +1,122 @@
 import {
-  AccountInfo,
-  Commitment,
-  Connection,
-  PublicKey,
-  PublicKeyInitData,
-} from '@solana/web3.js';
-
-import * as fzstd from 'fzstd';
-import {Market} from "@project-serum/serum";
-import * as buffer_layout from "buffer-layout";
-import { Token, TOKEN_PROGRAM_ID } from '@solana/spl-token';
-
-export async function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-export function chunk(array, size) {
-  return Array.apply(0, new Array(Math.ceil(array.length / size))).map((_, index) => array.slice(index * size, (index + 1) * size));
-}
-
-export async function getMultipleAccounts(
-  connection: Connection,
-  publicKeys: PublicKey[],
-  commitment?: Commitment,
-  minContextSlot?: number,
-): Promise<{
-  publicKey: PublicKey;
-  context: { slot: number };
-  accountInfo: AccountInfo<Buffer>;
-}[]> {
-
-  if (!publicKeys.length) {
-    throw new Error('no Public Keys provided to getMultipleAccounts');
+    PublicKey,
+    SystemProgram,
+    TransactionInstruction,
+  } from '@solana/web3.js';
+  import BN from 'bn.js';
+  import {
+    ASSOCIATED_TOKEN_PROGRAM_ID,
+    TOKEN_PROGRAM_ID,
+  } from '@solana/spl-token';
+  
+  export const SideUtils = {
+    Bid: { bid: {} },
+    Ask: { ask: {} },
+  };
+  
+  export const PlaceOrderTypeUtils = {
+    Limit: { limit: {} },
+    ImmediateOrCancel: { immediateOrCancel: {} },
+    FillOrKill: { fillOrKill: {} },
+    PostOnly: { postOnly: {} },
+    Market: { market: {} },
+    PostOnlySlide: { postOnlySlide: {} },
+  };
+  
+  export const SelfTradeBehaviorUtils = {
+    DecrementTake: { decrementTake: {} },
+    CancelProvide: { cancelProvide: {} },
+    AbortTransaction: { abortTransaction: {} },
+  };
+  
+  ///
+  /// numeric helpers
+  ///
+  export const U64_MAX_BN = new BN('18446744073709551615');
+  export const I64_MAX_BN = new BN('9223372036854775807').toTwos(64);
+  export const ORDER_FEE_UNIT: BN = new BN(1e6);
+  
+  export function bpsToDecimal(bps: number): number {
+    return bps / 10000;
   }
-
-  //set the maximum number of accounts per call
-  let chunkedPks = chunk(publicKeys, 100);
-
-  //asynchronously fetch each chunk of accounts and combine the results
-  return (await Promise.all(chunkedPks.map(async function (pkChunk) {
-
-    // load connection commitment as a default
-    commitment ||= connection.commitment;
-    //use zstd to compress large responses
-    let encoding = 'base64+zstd';
-    // set no minimum context slot by default
-    minContextSlot ||= 0;
-
-    const args = [pkChunk, {commitment, encoding, minContextSlot}];
-
-    // @ts-ignore
-    const gmaResult = await connection._rpcRequest('getMultipleAccounts', args);
-
-    if (gmaResult.error) {
-      throw new Error(gmaResult.error.message);
-    }
-
-    return gmaResult.result.value.map(
-      ({data, executable, lamports, owner}, i) => ({
-        publicKey: pkChunk[i],
-        context: gmaResult.result.context,
-        accountInfo: {
-          data: Buffer.from(fzstd.decompress(Buffer.from(data[0], 'base64'))),
-          executable,
-          owner: new PublicKey(owner),
-          lamports,
-        },
-      }),
+  
+  export function percentageToDecimal(percentage: number): number {
+    return percentage / 100;
+  }
+  
+  export function toNative(uiAmount: number, decimals: number): BN {
+    return new BN((uiAmount * Math.pow(10, decimals)).toFixed(0));
+  }
+  
+  export function toUiDecimals(nativeAmount: number, decimals: number): number {
+    return nativeAmount / Math.pow(10, decimals);
+  }
+  
+  ///
+  
+  ///
+  /// web3js extensions
+  ///
+  
+  /**
+   * Get the address of the associated token account for a given mint and owner
+   *
+   * @param mint                     Token mint account
+   * @param owner                    Owner of the new account
+   * @param allowOwnerOffCurve       Allow the owner account to be a PDA (Program Derived Address)
+   * @param programId                SPL Token program account
+   * @param associatedTokenProgramId SPL Associated Token program account
+   *
+   * @return Address of the associated token account
+   */
+  export async function getAssociatedTokenAddress(
+    mint: PublicKey,
+    owner: PublicKey,
+    allowOwnerOffCurve = true,
+    programId = TOKEN_PROGRAM_ID,
+    associatedTokenProgramId = ASSOCIATED_TOKEN_PROGRAM_ID,
+  ): Promise<PublicKey> {
+    if (!allowOwnerOffCurve && !PublicKey.isOnCurve(owner.toBuffer()))
+      throw new Error('TokenOwnerOffCurve!');
+  
+    const [address] = await PublicKey.findProgramAddress(
+      [owner.toBuffer(), programId.toBuffer(), mint.toBuffer()],
+      associatedTokenProgramId,
     );
-  }))).flat();
-
-}
-
-//load multiple markets at once instead of calling getAccountInfo for each market 3 times
-//by default it is 1 call to get the market and 2 calls to get the decimals for baseMint and quoteMint
-//this can be condensed into 2 calls total per 100 markets
-export async function loadMultipleOpenbookMarkets(connection,programId,marketsList){
-
-  let marketsMap = new Map();
-  let decimalMap = new Map();
-  let uniqueMints = new Set();
-
-  //get all the market data for an openbook market
-  let pubKeys = marketsList.map((item) => new PublicKey(item.address));
-  let marketsAccountInfos = await getMultipleAccounts(connection, pubKeys, 'processed');
-  marketsAccountInfos.forEach(function (result) {
-    let layout = Market.getLayout(programId);
-    let decoded = layout.decode(result.accountInfo.data);
-    uniqueMints.add(decoded.baseMint.toString());
-    uniqueMints.add(decoded.quoteMint.toString());
-    marketsMap.set(result.publicKey.toString(), {
-      decoded: decoded,
-      baseMint: decoded.baseMint,
-      quoteMint: decoded.quoteMint,
-      programId: programId
-    });
-  });
-
-  //get all the token's decimal values
-  const MINT_LAYOUT = buffer_layout.struct([buffer_layout.blob(44), buffer_layout.u8('decimals'), buffer_layout.blob(37)]);
-  let uniqueMintsPubKeys = Array.from(uniqueMints).map(mint => new PublicKey(<PublicKeyInitData>mint));
-  let uniqueMintsAccountInfos = await getMultipleAccounts(connection, uniqueMintsPubKeys, 'processed');
-  uniqueMintsAccountInfos.forEach(function (result) {
-    const {decimals} = MINT_LAYOUT.decode(result.accountInfo.data);
-    decimalMap.set(result.publicKey.toString(), decimals);
-  });
-
-  //loop back through the markets and load the market with the decoded data and the base/quote decimals
-  let spotMarkets: Market[] = [];
-  marketsMap.forEach(function (market) {
-    let baseMint = market.baseMint.toString();
-    let quoteMint = market.quoteMint.toString();
-    let openbookMarket = new Market(market.decoded, decimalMap.get(baseMint), decimalMap.get(quoteMint), {}, programId, null);
-    spotMarkets.push(openbookMarket);
-  });
-
-  return spotMarkets;
-}
-
-//get the associated accounts but don't check if they exist.
-//connection is passed to constructor but no RPC calls are made.
-export async function getMultipleAssociatedTokenAddresses(connection,owner,tokenAccounts){
-
-  //token.associatedProgramId & token.programId will be the same for each token
-  const token = new Token(connection, tokenAccounts[0].toString(), TOKEN_PROGRAM_ID, owner);
-  let associatedAccounts: PublicKey[] = [];
-
-  for (const tokenAccount of tokenAccounts) {
-    const associatedAddress = await Token.getAssociatedTokenAddress(token.associatedProgramId, token.programId, tokenAccount, owner.publicKey);
-    associatedAccounts.push(associatedAddress);
+  
+    return address;
   }
-
-  return associatedAccounts;
-}
+  
+  export async function createAssociatedTokenAccountIdempotentInstruction(
+    payer: PublicKey,
+    owner: PublicKey,
+    mint: PublicKey,
+  ): Promise<TransactionInstruction> {
+    const account = await getAssociatedTokenAddress(mint, owner);
+    return new TransactionInstruction({
+      keys: [
+        { pubkey: payer, isSigner: true, isWritable: true },
+        { pubkey: account, isSigner: false, isWritable: true },
+        { pubkey: owner, isSigner: false, isWritable: false },
+        { pubkey: mint, isSigner: false, isWritable: false },
+        {
+          pubkey: SystemProgram.programId,
+          isSigner: false,
+          isWritable: false,
+        },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      ],
+      programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+      data: Buffer.from([0x1]),
+    });
+  }
+  
+  export function sleep(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+  
+  /// chunk function to ensure transactions are not too large
+  export function chunk(array, size) {
+    return Array.apply(0, new Array(Math.ceil(array.length / size))).map(
+      (_, index) => array.slice(index * size, (index + 1) * size));
+  }
