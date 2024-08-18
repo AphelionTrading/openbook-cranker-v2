@@ -81,8 +81,9 @@ sudo docker run --name obv2-crank-v2 --env-file ./variables.env -v /path/to/your
 
 #### Format for .env
 
+```
 RPC_URL=
-WALLET_PATH=/your/path/to/wallet.json 
+WALLET_PATH=/your/path/to/wallet.json
 KEYPAIR= # leave empty if you gonna use WALLET_PATH
 PROGRAM_ID=opnb2LAfJYbRMAHHvqjCwQxanZn7ReEHp1k81EohpZb
 INTERVAL=500
@@ -95,7 +96,7 @@ PRIORITY_CU_PRICE=
 PRIORITY_CU_LIMIT=50000
 MAX_TX_INSTRUCTIONS=1
 CU_PRICE=0
-
+```
 
 #### TODO:
 
